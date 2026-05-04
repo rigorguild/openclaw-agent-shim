@@ -47,20 +47,25 @@ Pre-built binaries for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu
 
 ## Configuration
 
-The shim reads from environment:
+The shim reads everything from environment variables:
 
 | Variable | Default | Notes |
 |---|---|---|
 | `AGENT_SHIM_TOKEN` | (empty — auth disabled, warning logged) | Bearer token clients must send. **Set this in production.** |
-
-Other paths are currently hardcoded at the top of `src/main.rs` (`OPENCLAW_BIN`, `RUNS_DIR`, `OPENCLAW_CONFIG`, `BIND`). They match a Raspberry Pi 5 setup with openclaw installed via nvm. PRs to parametrize via env vars welcome.
+| `AGENT_SHIM_BIND` | `127.0.0.1:18790` | `host:port` to listen on. Use `0.0.0.0:<port>` only behind a trusted network boundary (Tailscale, VPN, reverse proxy). |
+| `AGENT_SHIM_OPENCLAW_BIN` | `openclaw` | Path to the openclaw CLI. Default relies on `$PATH`. Set explicitly if openclaw is installed under a custom location (e.g. nvm). |
+| `AGENT_SHIM_RUNS_DIR` | `/var/tmp/agent-shim/runs` | Where per-run JSON state files are written. Created on startup if missing. |
+| `AGENT_SHIM_OPENCLAW_CONFIG` | `$HOME/.openclaw/openclaw.json` | openclaw config used to validate that an incoming `agent_id` is actually registered. |
 
 ## Run
 
 Direct:
 
 ```bash
-AGENT_SHIM_TOKEN=changeme ./agent-shim
+AGENT_SHIM_TOKEN=changeme \
+AGENT_SHIM_BIND=127.0.0.1:18790 \
+AGENT_SHIM_OPENCLAW_BIN=$(which openclaw) \
+./agent-shim
 ```
 
 systemd user unit (example — adjust paths):

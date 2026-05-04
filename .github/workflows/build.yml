@@ -61,10 +61,16 @@ jobs:
         run: |
           mkdir -p release
           tag="${GITHUB_REF_NAME}"
+          # Map Rust target triples to friendlier names for release artifacts.
+          declare -A friendly=(
+            [x86_64-unknown-linux-gnu]=linux-x86_64
+            [aarch64-unknown-linux-gnu]=linux-aarch64
+          )
           for dir in artifacts/agent-shim-*/; do
             target=$(basename "$dir" | sed 's/^agent-shim-//')
+            label="${friendly[$target]:-$target}"
             chmod +x "$dir/agent-shim"
-            tar -czf "release/agent-shim-${tag}-${target}.tar.gz" -C "$dir" agent-shim
+            tar -czf "release/agent-shim-${tag}-${label}.tar.gz" -C "$dir" agent-shim
           done
           ls -lh release/
 

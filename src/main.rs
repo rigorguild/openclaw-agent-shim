@@ -20,21 +20,57 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 use std::thread;
 
 use tiny_http::{Header, Method, Response, Server};
 
-const BIND: &str = "0.0.0.0:18790";
-const OPENCLAW_BIN: &str = "/home/admin/.nvm/versions/node/v25.8.1/bin/openclaw";
-const RUNS_DIR: &str = "/var/tmp/agent-shim/runs";
-const OPENCLAW_CONFIG: &str = "/home/admin/.openclaw/openclaw.json";
+struct Config {
+    bind: String,
+    openclaw_bin: String,
+    runs_dir: PathBuf,
+    openclaw_config: PathBuf,
+    token: String,
+}
+
+impl Config {
+    fn from_env() -> Self {
+        let bind = env::var("AGENT_SHIM_BIND")
+            .unwrap_or_else(|_| "127.0.0.1:18790".to_string());
+        let openclaw_bin = env::var("AGENT_SHIM_OPENCLAW_BIN")
+            .unwrap_or_else(|_| "openclaw".to_string());
+        let runs_dir = env::var("AGENT_SHIM_RUNS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/var/tmp/agent-shim/runs"));
+        let openclaw_config = env::var("AGENT_SHIM_OPENCLAW_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = env::var("HOME").unwrap_or_default();
+                PathBuf::from(home).join(".openclaw/openclaw.json")
+            });
+        let token = env::var("AGENT_SHIM_TOKEN").unwrap_or_default();
+        Self {
+            bind,
+            openclaw_bin,
+            runs_dir,
+            openclaw_config,
+            token,
+        }
+    }
+}
+
+static CONFIG: OnceLock<Config> = OnceLock::new();
+
+fn config() -> &'static Config {
+    CONFIG.get().expect("Config must be initialized in main()")
+}
 
 /// Read the openclaw config and return the set of registered agent IDs.
 /// On any error reading/parsing, returns None — caller decides how to handle.
 fn load_known_agent_ids() -> Option<HashSet<String>> {
-    let content = fs::read_to_string(OPENCLAW_CONFIG).ok()?;
+    let content = fs::read_to_string(&config().openclaw_config).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
     let list = parsed.get("agents")?.get("list")?.as_array()?;
     Some(
@@ -61,7 +97,7 @@ fn gen_run_id() -> std::io::Result<String> {
 }
 
 fn run_state_path(run_id: &str) -> PathBuf {
-    PathBuf::from(RUNS_DIR).join(format!("{}.json", run_id))
+    config().runs_dir.join(format!("{}.json", run_id))
 }
 
 fn dispatch_agent_run(agent_id: String, message: String, run_id: String) {
@@ -81,7 +117,7 @@ fn dispatch_agent_run(agent_id: String, message: String, run_id: String) {
             &run_id[20..32],
         );
 
-        let output = Command::new(OPENCLAW_BIN)
+        let output = Command::new(&config().openclaw_bin)
             .arg("agent")
             .arg("--agent")
             .arg(&agent_id)
@@ -174,11 +210,11 @@ fn handle_get_run(request: tiny_http::Request, run_id: &str) -> std::io::Result<
 fn handle_post_dispatch(
     mut request: tiny_http::Request,
     agent_id: &str,
-    token: &str,
 ) -> std::io::Result<()> {
     if !is_valid_agent_id(agent_id) {
         return respond_text(request, 400, "Invalid agent id");
     }
+    let token = config().token.as_str();
     if !token.is_empty() {
         let provided = extract_bearer(request.headers());
         if provided.as_deref() != Some(token) {
@@ -225,18 +261,24 @@ fn handle_post_dispatch(
 }
 
 fn main() -> std::io::Result<()> {
-    let token = env::var("AGENT_SHIM_TOKEN").unwrap_or_default();
-    if token.is_empty() {
+    CONFIG
+        .set(Config::from_env())
+        .ok()
+        .expect("CONFIG already initialized");
+    let cfg = config();
+
+    if cfg.token.is_empty() {
         eprintln!("agent-shim: WARNING — AGENT_SHIM_TOKEN env var not set; auth disabled");
     }
 
-    fs::create_dir_all(RUNS_DIR)?;
+    fs::create_dir_all(&cfg.runs_dir)?;
 
-    let server = Server::http(BIND)
+    let server = Server::http(&cfg.bind)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
     eprintln!(
         "agent-shim listening on http://{} (runs dir: {})",
-        BIND, RUNS_DIR
+        cfg.bind,
+        cfg.runs_dir.display()
     );
 
     for request in server.incoming_requests() {
@@ -260,7 +302,7 @@ fn main() -> std::io::Result<()> {
                 continue;
             }
             let agent_id = path.trim_start_matches('/').to_string();
-            handle_post_dispatch(request, &agent_id, &token)?;
+            handle_post_dispatch(request, &agent_id)?;
             continue;
         }
 
