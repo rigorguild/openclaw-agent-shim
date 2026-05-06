@@ -68,16 +68,33 @@ fn config() -> &'static Config {
 }
 
 /// Read the openclaw config and return the set of registered agent IDs.
-/// On any error reading/parsing, returns None — caller decides how to handle.
+/// On I/O or parse error, returns None — caller responds 503.
+/// On valid JSON without agents/agents.list (fresh install), returns Some({"main"})
+/// to match openclaw's own DEFAULT_AGENT_ID fallback in agent-scope.listAgentIds().
 fn load_known_agent_ids() -> Option<HashSet<String>> {
     let content = fs::read_to_string(&config().openclaw_config).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let list = parsed.get("agents")?.get("list")?.as_array()?;
-    Some(
-        list.iter()
-            .filter_map(|e| e.get("id").and_then(|i| i.as_str()).map(String::from))
-            .collect(),
-    )
+    parse_known_agent_ids(&content)
+}
+
+/// Pure parsing logic split out of `load_known_agent_ids` for unit testing.
+fn parse_known_agent_ids(content: &str) -> Option<HashSet<String>> {
+    let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
+    let mut ids: HashSet<String> = parsed
+        .get("agents")
+        .and_then(|a| a.get("list"))
+        .and_then(|l| l.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|e| e.get("id").and_then(|i| i.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    // Match openclaw's fallback: empty or missing agents.list means the implicit
+    // "main" agent is valid. Dispatching to "main" against a fresh openclaw works.
+    if ids.is_empty() {
+        ids.insert("main".to_string());
+    }
+    Some(ids)
 }
 
 fn is_valid_agent_id(id: &str) -> bool {
@@ -310,4 +327,64 @@ fn main() -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_returns_none_on_invalid_json() {
+        assert!(parse_known_agent_ids("not json").is_none());
+        assert!(parse_known_agent_ids("").is_none());
+    }
+
+    #[test]
+    fn parse_falls_back_to_main_when_agents_missing() {
+        // Empty config object — no `agents` key at all.
+        let ids = parse_known_agent_ids("{}").expect("valid JSON should parse");
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains("main"));
+    }
+
+    #[test]
+    fn parse_falls_back_to_main_when_list_missing() {
+        // `agents` exists but no `list` field.
+        let ids = parse_known_agent_ids(r#"{"agents": {}}"#).expect("valid JSON");
+        assert!(ids.contains("main"));
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn parse_falls_back_to_main_when_list_is_empty() {
+        let ids = parse_known_agent_ids(r#"{"agents": {"list": []}}"#).expect("valid JSON");
+        assert!(ids.contains("main"));
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn parse_returns_configured_ids_when_present() {
+        let json = r#"{"agents": {"list": [{"id": "juana"}, {"id": "antonito"}]}}"#;
+        let ids = parse_known_agent_ids(json).expect("valid JSON");
+        assert!(ids.contains("juana"));
+        assert!(ids.contains("antonito"));
+        assert!(!ids.contains("main"));
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn parse_skips_entries_without_id() {
+        let json = r#"{"agents": {"list": [{"id": "juana"}, {"name": "no-id-here"}]}}"#;
+        let ids = parse_known_agent_ids(json).expect("valid JSON");
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains("juana"));
+    }
+
+    #[test]
+    fn parse_treats_non_array_list_as_empty_and_falls_back() {
+        // Defensive: if list is not actually an array, behave like missing.
+        let ids = parse_known_agent_ids(r#"{"agents": {"list": "wrong-type"}}"#)
+            .expect("valid JSON");
+        assert!(ids.contains("main"));
+    }
 }
